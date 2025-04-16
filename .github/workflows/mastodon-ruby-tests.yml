@@ -1,0 +1,107 @@
+name: mastodon-ruby-tests
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build
+
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10ms
+          --health-timeout 3s
+          --health-retries 50
+        ports:
+          - 5432:5432
+
+      redis:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10ms
+          --health-timeout 3s
+          --health-retries 50
+        ports:
+          - 6379:6379
+
+    env:
+      DB_HOST: localhost
+      DB_USER: postgres
+      DB_PASS: postgres
+      COVERAGE: false
+      RAILS_ENV: test
+      ALLOW_NOPAM: true
+      PAM_ENABLED: true
+      PAM_DEFAULT_SERVICE: pam_test
+      PAM_CONTROLLED_SERVICE: pam_test_controlled
+      OIDC_ENABLED: true
+      OIDC_SCOPE: read
+      SAML_ENABLED: true
+      CAS_ENABLED: true
+      BUNDLE_WITH: 'pam_authentication test'
+      GITHUB_RSPEC: false
+
+    steps:
+      - name: Checkout mastodon
+        uses: actions/checkout@v4
+        with:
+          repository: mastodon/mastodon
+      - name: Install pre-requisites
+        run: |
+          sudo apt update
+          sudo apt install -y libicu-dev libidn11-dev libvips42 ffmpeg imagemagick libpam-dev
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4
+          bundler-cache: true
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+      - name: Enable corepack
+        shell: bash
+        run: corepack enable
+      - name: Get yarn cache directory path
+        id: yarn-cache-dir-path
+        shell: bash
+        run: echo "dir=$(yarn config get cacheFolder)" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v4
+        id: yarn-cache
+        with:
+          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+      - name: Install all production yarn packages
+        shell: bash
+        run: yarn workspaces focus --production
+      - name: Cache assets from compilation
+        uses: actions/cache@v4
+        with:
+          path: |
+            public/assets
+            public/packs
+            public/packs-test
+            tmp/cache/webpacker
+          key: test-assets-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            test-assets-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+            test-assets-${{ github.head_ref || github.ref_name }}
+            test-assets-main
+            test-assets
+      - name: Precompile assets
+        run: |-
+          bin/rails assets:precompile
+      - name: Load database schema
+        run: |
+          bin/rails db:setup
+          bin/flatware fan bin/rails db:test:prepare
+      - run: bin/flatware rspec -r ./spec/flatware_helper.rb
